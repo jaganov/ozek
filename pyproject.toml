@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ozek"
+version = "0.1.0"
+description = "Thin Mac-first MLX runtime for local agents (CLI + HTTP)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "jaganov" }]
+keywords = ["mlx", "llm", "apple-silicon", "local-ai", "agents"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: MacOS X",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "mlx-lm>=0.32.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/jaganov/ozek"
+Issues = "https://github.com/jaganov/ozek/issues"
+
+[project.scripts]
+ozek = "ozek.cli:main"
+ozek-server = "ozek.server:main"
+
+[tool.setuptools.packages.find]
+include = ["ozek*"]
