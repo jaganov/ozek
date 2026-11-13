@@ -1,0 +1,6 @@
+include LICENSE
+include README.md
+include ozek.yml
+include pyproject.toml
+recursive-include tests *.py
+recursive-include assets *.png

@@ -1,0 +1,40 @@
+# Ozek local config — copy/edit, or place at ~/.config/ozek/ozek.yml
+# Usage:
+#   ozek run summarize --prompt "..."
+#   ozek-server --config ozek.yml
+
+default_profile: qwen25-3b-4bit
+
+server:
+  host: 127.0.0.1
+  port: 8787
+
+presets:
+  summarize:
+    system: >
+      Summarize the user's text. Reply with JSON only.
+      Fill the fields; never echo the schema itself.
+    max_tokens: 256
+    temperature: 0.2
+    response_format: json
+    json_retries: 1
+    timeout_s: 60
+    schema:
+      type: object
+      properties:
+        summary:
+          type: string
+        bullets:
+          type: array
+          items:
+            type: string
+      required: [summary, bullets]
+
+  draft:
+    temperature: 0.7
+    max_tokens: 512
+
+  short:
+    max_tokens: 64
+    temperature: 0.0
+    stop: ["\n\n"]
