@@ -12,15 +12,41 @@
 
 Kazakh **өзек** — core / stem / essence.
 
-**A lightweight inference runtime for local AI agents on Apple Silicon.**
+**A lightweight MLX inference runtime for local AI agents on Apple Silicon.**
 
-Ozek wraps [MLX](https://github.com/ml-explore/mlx) / [`mlx-lm`](https://github.com/ml-explore/mlx-lm) with a small Python API, CLI, and local HTTP server: load one model, generate or stream tokens, return metrics. Heavy compute stays in Metal kernels; Ozek handles control plane (sampler, stop, cancel, JSON helpers, YAML presets).
+### Who this is for
+
+| You have… | Use |
+|---|---|
+| **Apple Silicon Mac** | **Ozek + MLX** — the fast local path on Mac |
+| **NVIDIA GPU + Linux/Windows** | **CUDA** (llama.cpp / vLLM / Ollama) — usually the speed king there |
+| Neither | Portable stacks (llama.cpp Vulkan/ROCm, etc.) — fine for compatibility, rarely the throughput leader |
+
+**No Mac in the table below?** Ozek is not the tool you want — pick a CUDA stack on NVIDIA; it will typically be faster for you than forcing MLX elsewhere.
+
+Ozek is the **Apple line**: one model slot on mini / Studio / MacBook, thin CLI + local HTTP on top of [MLX](https://github.com/ml-explore/mlx) / [`mlx-lm`](https://github.com/ml-explore/mlx-lm). Multi-Mac **Thunderbolt 5 RDMA** clustering is an MLX Distributed path for later — not required to use Ozek today.
+
+### Apple Silicon lineup (MLX runs here)
+
+Works on **Apple Silicon** (not Intel Mac), macOS **14+**, native arm64 Python. Newer chips and more unified memory → larger models and better tok/s.
+
+| Generation | Chips | Notes |
+|---|---|---|
+| **M1** | M1 · M1 Pro · M1 Max · M1 Ultra | Entry point for MLX; base M1 is fine for small/mid models |
+| **M2** | M2 · M2 Pro · M2 Max · M2 Ultra | Strong everyday local agents (e.g. 16 GB Pro class) |
+| **M3** | M3 · M3 Pro · M3 Max · M3 Ultra | Ultra = big single-box memory pool |
+| **M4** | M4 · M4 Pro · M4 Max | Pro/Max: Thunderbolt 5 on supported machines → future RDMA clusters |
+| **M5+** | M5 · M5 Pro · M5 Max · M5 Ultra | Current top of the Mac local-LLM ladder |
+
+**Where it shines:** Pro / Max / Ultra with **36–512 GB** unified memory — big open-weight models in one box without a discrete GPU.
+
+On Mac, **MLX is the runtime to prefer for generation speed** vs llama.cpp Metal / Ollama-class stacks. Typical decode advantage is often about **~10–40%+** depending on model and chip (dense models nearer the low end; some MoE / archs much higher). Prefill/TTFT can still favor llama.cpp on long prompts. See [Performance](#performance-apple-m2-pro-16-gb) for one machine’s numbers.
 
 | | Larger local stacks | Ozek |
 |---|---|---|
 | Surface | chat UI, multi-model hubs | library + CLI + local HTTP |
-| Backend | often llama.cpp (+ product layer) | **MLX** on Apple Silicon |
-| Scope | full apps | one loaded model slot |
+| Backend | llama.cpp / CUDA product layers | **MLX** on Apple Silicon |
+| Scope | full apps or multi-OS | one loaded model slot on Mac |
 
 ## Status
 
@@ -28,8 +54,9 @@ Ozek wraps [MLX](https://github.com/ml-explore/mlx) / [`mlx-lm`](https://github.
 
 ## Requirements
 
-- Apple Silicon Mac (M1 / M2 / M3 / M4)
-- Python 3.11+
+- Apple Silicon Mac (**M1 → M5+**, any Pro / Max / Ultra variant)
+- macOS 14.0+
+- Python 3.11+ (native **arm64**)
 - [`mlx-lm`](https://github.com/ml-explore/mlx-lm) (pulled in with install)
 
 ## Install
@@ -38,6 +65,45 @@ Ozek wraps [MLX](https://github.com/ml-explore/mlx) / [`mlx-lm`](https://github.
 git clone https://github.com/jaganov/ozek.git
 cd ozek
 python3 -m pip install -e .
+```
+
+## Models
+
+Ozek loads **MLX-format** weights only (via [`mlx-lm`](https://github.com/ml-explore/mlx-lm)) — not GGUF from llama.cpp.
+
+You can point at either:
+
+| Source | Example |
+|---|---|
+| Hugging Face / MLX Community id | `mlx-community/Qwen2.5-3B-Instruct-4bit` |
+| **Local folder** (already downloaded) | `/Users/you/Models/Qwen2.5-3B-Instruct-4bit` |
+
+```bash
+# Hub id (downloads on first load)
+ozek generate --model mlx-community/Qwen2.5-3B-Instruct-4bit --prompt "Hi"
+
+# Local path — no re-download
+ozek generate --model ~/Models/Qwen2.5-3B-Instruct-4bit --prompt "Hi"
+```
+
+In `ozek.yml`:
+
+```yaml
+default_model: /Users/you/Models/Qwen2.5-3B-Instruct-4bit
+# or per preset:
+# presets:
+#   local:
+#     model: /Users/you/Models/Qwen2.5-3B-Instruct-4bit
+```
+
+**Cache when downloading from the Hub:** `~/.cache/huggingface/hub/`  
+(override with `HF_HOME` or `HUGGINGFACE_HUB_CACHE`).
+
+Prefetch into a folder you control:
+
+```bash
+huggingface-cli download mlx-community/Qwen2.5-3B-Instruct-4bit \
+  --local-dir ~/Models/Qwen2.5-3B-Instruct-4bit
 ```
 
 ## CLI
@@ -68,6 +134,7 @@ Example config ships in the repo root; you can also keep one at `~/.config/ozek/
 
 ```yaml
 default_profile: qwen25-3b-4bit
+# default_model: /Users/you/Models/Qwen2.5-3B-Instruct-4bit   # optional local MLX folder
 server:
   host: 127.0.0.1
   port: 8787
