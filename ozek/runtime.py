@@ -17,8 +17,18 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from .contract import CONTRACT_VERSION, contract_meta
+from .budget import ContextBudget, ContextBudgetError, count_tokens
+from .harmony import (
+    final_channel_closed,
+    normalize_reasoning_effort,
+    parse_harmony,
+)
 from .profiles import DEFAULT_MODEL, DEFAULT_PROFILE_ID
-from .structured import SchemaInput, apply_json_mode, try_extract_json
+from .structured import (
+    SchemaInput,
+    apply_json_mode,
+    try_extract_and_validate_json,
+)
 
 StopInput = Union[str, Sequence[str], None]
 ResponseFormat = Optional[str]  # None | "text" | "json"
@@ -42,6 +52,10 @@ class BusyError(RuntimeError):
     """Raised when a generate/stream is already in progress."""
 
 
+# Re-export for callers / HTTP.
+__all_runtime_errors__ = ("BusyError", "ContextBudgetError")
+
+
 @dataclass
 class GenerateStats:
     model: str
@@ -54,7 +68,7 @@ class GenerateStats:
     decode_tps_wall: float
     peak_memory_gb: float
     enable_thinking: bool
-    finish_reason: str = "length"  # length | stop | cancel | eos | timeout
+    finish_reason: str = "length"  # length | stop | cancel | eos | timeout | final
     temperature: float = 0.0
     top_p: float = 0.0
     top_k: int = 0
@@ -65,9 +79,15 @@ class GenerateStats:
     timeout_s: Optional[float] = None
     json_retries: int = 0
     attempts: int = 1
+    reasoning_effort: Optional[str] = None
+    stop_after_final: bool = True
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        # Agent-friendly aliases (prefill ≈ prompt encode+forward; decode ≈ tok/s).
+        d["prefill_tps"] = d.get("prompt_tps")
+        d["decode_tps"] = d.get("generation_tps")
+        return d
 
 
 @dataclass
@@ -77,10 +97,25 @@ class GenerateResult:
     parsed: Any = None
     parse_error: Optional[str] = None
     response_format: str = "text"
+    thinking: Optional[str] = None
+    final: Optional[str] = None
+    final_only: bool = True
+
+    @property
+    def display_text(self) -> str:
+        """User-facing text: ``final`` when ``final_only`` and present, else raw."""
+        if self.final_only and self.final is not None:
+            return self.final
+        if self.final_only and self.thinking and self.final is None:
+            return self.thinking
+        return self.text
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
-            "text": self.text,
+            "text": self.display_text if self.final_only else self.text,
+            "raw": self.text,
+            "thinking": self.thinking,
+            "final": self.final,
             "stats": self.stats.as_dict(),
             "response_format": self.response_format,
         }
@@ -161,7 +196,13 @@ class OzekMLXRuntime:
                 from mlx_lm import load
 
                 t0 = time.perf_counter()
-                self._model, self._tokenizer = load(model_id)
+                # llm-jp and similar ship custom tokenizer modules; mlx-lm needs
+                # trust_remote_code for both model and AutoTokenizer paths.
+                self._model, self._tokenizer = load(
+                    model_id,
+                    tokenizer_config={"trust_remote_code": True},
+                    trust_remote_code=True,
+                )
                 self.load_s = time.perf_counter() - t0
                 self.model_id = model_id
                 return self.load_s
@@ -241,6 +282,7 @@ class OzekMLXRuntime:
         system: Optional[str],
         enable_thinking: bool,
         messages: Optional[list[dict[str, str]]],
+        reasoning_effort: Optional[str] = None,
     ) -> str:
         if messages is None:
             messages = []
@@ -250,19 +292,44 @@ class OzekMLXRuntime:
 
         if not hasattr(tokenizer, "apply_chat_template"):
             return prompt
+
+        effort = normalize_reasoning_effort(reasoning_effort)
+        # Template expects low|medium|high; ``off`` is an Ozek/CaraInfer hack.
+        template_effort = "low" if effort == "off" else effort
+
+        kwargs: dict[str, Any] = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        if template_effort is not None:
+            kwargs["reasoning_effort"] = template_effort
+        if enable_thinking:
+            kwargs["enable_thinking"] = True
+
         try:
-            return tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=enable_thinking,
-            )
+            text = tokenizer.apply_chat_template(messages, **kwargs)
         except TypeError:
-            return tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
+            # Older templates may reject unknown kwargs.
+            fallback = {
+                "tokenize": False,
+                "add_generation_prompt": True,
+            }
+            if enable_thinking:
+                fallback["enable_thinking"] = True
+            try:
+                text = tokenizer.apply_chat_template(messages, **fallback)
+            except TypeError:
+                text = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+
+        if effort == "off" and isinstance(text, str):
+            # Best-effort: open final channel immediately (skip analysis).
+            if text.endswith("<|start|>assistant"):
+                text = text + "<|channel|>final<|message|>"
+            elif not text.endswith("<|channel|>final<|message|>"):
+                text = text + "<|channel|>final<|message|>"
+        return text
 
     def _acquire_slot(self) -> None:
         if not self._slot.acquire(blocking=False):
@@ -291,6 +358,10 @@ class OzekMLXRuntime:
         timeout_s: Optional[float] = None,
         seed: Optional[int] = None,
         json_retries: int = 0,
+        final_only: bool = True,
+        reasoning_effort: Optional[str] = None,
+        stop_after_final: bool = True,
+        max_context_tokens: Optional[int] = None,
     ) -> GenerateResult:
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_logits_processors, make_sampler
@@ -302,6 +373,14 @@ class OzekMLXRuntime:
             raise ValueError("timeout_s must be > 0")
         if json_retries < 0:
             raise ValueError("json_retries must be >= 0")
+        if max_context_tokens is not None and max_context_tokens <= 0:
+            raise ValueError("max_context_tokens must be > 0")
+        effort = normalize_reasoning_effort(reasoning_effort)
+        budget = (
+            ContextBudget(int(max_context_tokens))
+            if max_context_tokens is not None
+            else None
+        )
 
         base_system = system
         base_messages = messages
@@ -354,7 +433,11 @@ class OzekMLXRuntime:
                     system=sys_prompt,
                     enable_thinking=enable_thinking,
                     messages=msgs,
+                    reasoning_effort=effort,
                 )
+                if budget is not None:
+                    prompt_tok = count_tokens(tokenizer, text_prompt)
+                    budget.check(prompt_tok, max_tokens)
 
                 pieces: list[str] = []
                 first_token_s: Optional[float] = None
@@ -390,6 +473,13 @@ class OzekMLXRuntime:
                         finish_reason = "stop"
                         break
 
+                    if stop_after_final:
+                        closed, truncated = final_channel_closed(text_so_far)
+                        if closed:
+                            pieces = [truncated]
+                            finish_reason = "final"
+                            break
+
                     fr = getattr(resp, "finish_reason", None)
                     if fr is not None:
                         finish_reason = "eos" if fr == "stop" else str(fr)
@@ -401,6 +491,11 @@ class OzekMLXRuntime:
                 text, hit = _apply_stop(text, stops)
                 if hit and finish_reason == "length":
                     finish_reason = "stop"
+                if stop_after_final and finish_reason == "length":
+                    closed, truncated = final_channel_closed(text)
+                    if closed:
+                        text = truncated
+                        finish_reason = "final"
 
                 gen_tokens = int(getattr(last, "generation_tokens", 0) or 0)
                 ttft = float(first_token_s or 0.0)
@@ -440,11 +535,18 @@ class OzekMLXRuntime:
                     timeout_s=timeout_s,
                     json_retries=retries,
                     attempts=attempt,
+                    reasoning_effort=effort,
+                    stop_after_final=bool(stop_after_final),
                 )
+                harmony = parse_harmony(text)
                 parsed = None
                 parse_error = None
                 if fmt == "json":
-                    parsed, parse_error = try_extract_json(text)
+                    # Prefer JSON inside the final channel (ignore analysis prose).
+                    json_src = harmony.final if harmony.final is not None else text
+                    parsed, parse_error = try_extract_and_validate_json(
+                        json_src, schema=schema
+                    )
 
                 result = GenerateResult(
                     text=text,
@@ -452,6 +554,9 @@ class OzekMLXRuntime:
                     parsed=parsed,
                     parse_error=parse_error,
                     response_format=fmt,
+                    thinking=harmony.thinking,
+                    final=harmony.final,
+                    final_only=bool(final_only),
                 )
                 self._last_stats = stats
 
@@ -484,13 +589,17 @@ class OzekMLXRuntime:
         timeout_s: Optional[float] = None,
         seed: Optional[int] = None,
         json_retries: int = 0,  # ignored for stream; use generate for retries
+        reasoning_effort: Optional[str] = None,
+        stop_after_final: bool = True,
+        final_only: bool = True,  # accepted for shared kwargs; stream still yields raw chunks
     ) -> Iterator[str]:
         """Yield text chunks. Raises BusyError if another job holds the slot.
 
-        Sets ``last_stream_finish`` when done (``length``|``stop``|``cancel``|``eos``|``timeout``).
+        Sets ``last_stream_finish`` when done
+        (``length``|``stop``|``cancel``|``eos``|``timeout``|``final``).
         ``response_format=json`` only injects the prompt nudge; parse via ``generate``.
         """
-        del json_retries  # stream does not retry; accepted for shared kwargs
+        del json_retries, final_only  # stream does not retry / reformat
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
@@ -499,6 +608,7 @@ class OzekMLXRuntime:
             raise ValueError("response_format must be 'text' or 'json'")
         if timeout_s is not None and timeout_s <= 0:
             raise ValueError("timeout_s must be > 0")
+        effort = normalize_reasoning_effort(reasoning_effort)
         if fmt == "json":
             system, messages = apply_json_mode(
                 system=system, messages=messages, schema=schema
@@ -519,6 +629,7 @@ class OzekMLXRuntime:
                 system=system,
                 enable_thinking=enable_thinking,
                 messages=messages,
+                reasoning_effort=effort,
             )
             sampler = make_sampler(
                 temp=temperature, top_p=top_p, top_k=top_k, min_p=min_p
@@ -562,6 +673,17 @@ class OzekMLXRuntime:
                         yield allowed
                     finish_reason = "stop"
                     break
+                if stop_after_final:
+                    closed, closed_text = final_channel_closed(emitted)
+                    if closed:
+                        prev_len = len(emitted) - len(resp.text)
+                        allowed = (
+                            closed_text[prev_len:] if prev_len < len(closed_text) else ""
+                        )
+                        if allowed:
+                            yield allowed
+                        finish_reason = "final"
+                        break
                 yield resp.text
                 if resp.finish_reason is not None:
                     finish_reason = (

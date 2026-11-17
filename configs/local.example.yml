@@ -1,0 +1,19 @@
+# Template for a machine-local override (copy → local.yml — gitignored).
+#
+#   cp configs/local.example.yml configs/local.yml
+#
+# Prefer Hub ids in committed files. Put absolute MLX folders only here, e.g.:
+#
+# default_model: /Users/you/Models/llm-jp-4.1-8b-thinking-4bit
+# presets:
+#   llmjp-short:
+#     model: /Users/you/Models/llm-jp-4.1-8b-thinking-4bit
+#     max_tokens: 256
+#     reasoning_effort: low
+#     final_only: true
+#
+# Ozek also picks up ./ozek.local.yml or ./ozek.yml in the working directory
+# (both gitignored). Use whichever you prefer.
+
+default_profile: qwen25-3b-4bit
+max_context_tokens: 4096

@@ -15,6 +15,7 @@ from .config import (
     resolve_model_from_config,
 )
 from .profiles import DEFAULT_PROFILE_ID, list_profiles, resolve_model
+from .budget import ContextBudgetError
 from .runtime import BusyError, GenerateResult, runtime
 
 
@@ -35,7 +36,7 @@ def _print_result(result: GenerateResult, *, as_json: bool) -> int:
         if result.parse_error:
             print(f"-- parse_error: {result.parse_error}", file=sys.stderr)
     else:
-        print(result.text)
+        print(result.display_text)
         if result.parse_error:
             print(f"-- parse_error: {result.parse_error}", file=sys.stderr)
         s = result.stats
@@ -68,6 +69,9 @@ def _do_generate(
     except BusyError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except ContextBudgetError as e:
+        print(json.dumps(e.as_dict(), ensure_ascii=False, indent=2), file=sys.stderr)
+        return 2
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -95,6 +99,14 @@ def _cli_overrides(args: argparse.Namespace, *, for_run: bool) -> dict[str, Any]
         take("stop", args.stop)
         if getattr(args, "think", False):
             out["think"] = True
+        if getattr(args, "raw", False):
+            out["final_only"] = False
+        elif getattr(args, "final_only", False):
+            out["final_only"] = True
+        if getattr(args, "reasoning_effort", None) is not None:
+            out["reasoning_effort"] = args.reasoning_effort
+        if getattr(args, "no_stop_after_final", False):
+            out["stop_after_final"] = False
         if getattr(args, "response_json", False):
             out["response_format"] = "json"
         if args.schema is not None:
@@ -102,6 +114,7 @@ def _cli_overrides(args: argparse.Namespace, *, for_run: bool) -> dict[str, Any]
         take("timeout_s", args.timeout)
         take("seed", args.seed)
         take("json_retries", args.json_retries)
+        take("max_context_tokens", args.max_context_tokens)
         take("model", args.model)
         take("profile", args.profile)
     else:
@@ -117,6 +130,12 @@ def _cli_overrides(args: argparse.Namespace, *, for_run: bool) -> dict[str, Any]
             out["stop"] = args.stop
         if args.think:
             out["think"] = True
+        # Default UX: answer only; --raw keeps full Harmony markup.
+        out["final_only"] = not bool(args.raw)
+        if args.reasoning_effort is not None:
+            out["reasoning_effort"] = args.reasoning_effort
+        if args.no_stop_after_final:
+            out["stop_after_final"] = False
         out["response_format"] = "json" if args.response_json else "text"
         if args.schema is not None:
             out["schema"] = _load_schema(args.schema)
@@ -126,6 +145,8 @@ def _cli_overrides(args: argparse.Namespace, *, for_run: bool) -> dict[str, Any]
             out["seed"] = args.seed
         if args.json_retries:
             out["json_retries"] = args.json_retries
+        if args.max_context_tokens is not None:
+            out["max_context_tokens"] = args.max_context_tokens
         out["model"] = args.model
         out["profile"] = args.profile
     return out
@@ -140,6 +161,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
         profile=overrides.pop("profile", None),
     )
     gen_kwargs = preset_to_generate_kwargs(overrides)
+    gen_kwargs.setdefault("final_only", True)
+    gen_kwargs.setdefault("stop_after_final", True)
+    if cfg.max_context_tokens is not None:
+        gen_kwargs.setdefault("max_context_tokens", cfg.max_context_tokens)
     return _do_generate(
         args.prompt,
         model=model,
@@ -168,6 +193,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     # Defaults if preset omitted sampler fields
     gen_kwargs.setdefault("max_tokens", 128)
     gen_kwargs.setdefault("temperature", 0.0)
+    gen_kwargs.setdefault("final_only", True)
+    gen_kwargs.setdefault("stop_after_final", True)
+    if cfg.max_context_tokens is not None:
+        gen_kwargs.setdefault("max_context_tokens", cfg.max_context_tokens)
     return _do_generate(
         args.prompt,
         model=model,
@@ -236,6 +265,33 @@ def _add_common_gen_flags(p: argparse.ArgumentParser, *, run_mode: bool) -> None
     p.add_argument("--repetition-penalty", type=float, default=None)
     p.add_argument("--stop", action="append", default=None)
     p.add_argument("--think", action="store_true")
+    p.add_argument(
+        "--final-only",
+        action="store_true",
+        help="print only the Harmony final channel (default behaviour)",
+    )
+    p.add_argument(
+        "--raw",
+        action="store_true",
+        help="print full Harmony text (analysis + final); disables final_only",
+    )
+    p.add_argument(
+        "--reasoning-effort",
+        default=None,
+        choices=["low", "medium", "high", "off"],
+        help="LLM-jp Harmony Reasoning: low|medium|high; off≈skip analysis (best-effort)",
+    )
+    p.add_argument(
+        "--no-stop-after-final",
+        action="store_true",
+        help="do not stop decode when the final channel closes",
+    )
+    p.add_argument(
+        "--max-context-tokens",
+        type=int,
+        default=None,
+        help="refuse if prompt_tokens + max_tokens exceeds this (KV/RAM guard)",
+    )
     p.add_argument(
         "--response-json",
         action="store_true",

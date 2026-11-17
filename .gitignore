@@ -16,3 +16,16 @@ venv/
 .coverage
 htmlcov/
 *.whl
+
+# Personal machine config (Hub defaults live in configs/*.example.yml)
+ozek.yml
+ozek.yaml
+ozek.local.yml
+ozek.local.yaml
+configs/local.yml
+configs/local.yaml
+configs/*.local.yml
+configs/*.local.yaml
+
+# Local experiment scripts / results (not part of the public runtime)
+scripts/

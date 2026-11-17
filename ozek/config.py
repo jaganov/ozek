@@ -3,8 +3,11 @@
 Search order for config file (first hit wins):
   1. explicit ``--config`` / ``path=``
   2. ``$OZEK_CONFIG``
-  3. ``./ozek.yml`` then ``./ozek.yaml``
-  4. ``~/.config/ozek/ozek.yml`` then ``~/.config/ozek/ozek.yaml``
+  3. ``./ozek.local.yml`` then ``./ozek.local.yaml``  (personal, gitignored)
+  4. ``./ozek.yml`` then ``./ozek.yaml``              (personal, gitignored)
+  5. ``./configs/local.yml`` then ``./configs/local.yaml``
+  6. ``~/.config/ozek/ozek.yml`` then ``~/.config/ozek/ozek.yaml``
+  7. bundled ``configs/ozek.example.yml`` (repo get-started fallback)
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 CONFIG_FILENAMES = ("ozek.yml", "ozek.yaml")
+LOCAL_FILENAMES = ("ozek.local.yml", "ozek.local.yaml")
+CONFIGS_LOCAL_FILENAMES = ("local.yml", "local.yaml")
 
 # Keys allowed inside a preset (forward-compatible: unknown keys ignored with warn?).
 PRESET_KEYS = frozenset(
@@ -30,6 +35,10 @@ PRESET_KEYS = frozenset(
         "repetition_penalty",
         "stop",
         "think",
+        "final_only",
+        "reasoning_effort",
+        "stop_after_final",
+        "max_context_tokens",
         "response_format",
         "schema",
         "timeout_s",
@@ -37,6 +46,15 @@ PRESET_KEYS = frozenset(
         "json_retries",
     }
 )
+
+
+def package_root() -> Path:
+    """Repo / install root that contains ``configs/`` (parent of the ``ozek`` package)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def bundled_example_path() -> Path:
+    return package_root() / "configs" / "ozek.example.yml"
 
 
 @dataclass
@@ -53,6 +71,13 @@ class OzekConfig:
     def default_model(self) -> Optional[str]:
         v = self.raw.get("default_model")
         return str(v) if v else None
+
+    @property
+    def max_context_tokens(self) -> Optional[int]:
+        v = self.raw.get("max_context_tokens")
+        if v is None or v == "":
+            return None
+        return int(v)
 
     @property
     def server(self) -> dict[str, Any]:
@@ -85,6 +110,7 @@ class OzekConfig:
             "path": str(self.path) if self.path else None,
             "default_profile": self.default_profile,
             "default_model": self.default_model,
+            "max_context_tokens": self.max_context_tokens,
             "server": self.server,
             "presets": sorted(self.presets),
         }
@@ -96,11 +122,18 @@ def config_search_paths() -> list[Path]:
     if env:
         paths.append(Path(env).expanduser())
     cwd = Path.cwd()
+    for name in LOCAL_FILENAMES:
+        paths.append(cwd / name)
     for name in CONFIG_FILENAMES:
         paths.append(cwd / name)
+    configs_dir = cwd / "configs"
+    for name in CONFIGS_LOCAL_FILENAMES:
+        paths.append(configs_dir / name)
     home_cfg = Path.home() / ".config" / "ozek"
     for name in CONFIG_FILENAMES:
         paths.append(home_cfg / name)
+    bundled = bundled_example_path()
+    paths.append(bundled)
     return paths
 
 
@@ -122,7 +155,8 @@ def load_config(path: Optional[str | Path] = None, *, required: bool = False) ->
     if found is None:
         if required:
             raise FileNotFoundError(
-                "no ozek.yml found (cwd, $OZEK_CONFIG, or ~/.config/ozek/)"
+                "no ozek.yml found (cwd, $OZEK_CONFIG, ~/.config/ozek/, "
+                "or configs/ozek.example.yml)"
             )
         return OzekConfig(path=None, raw={})
 
@@ -183,6 +217,16 @@ def preset_to_generate_kwargs(merged: dict[str, Any]) -> dict[str, Any]:
             kwargs["stop"] = list(stop)
     if "think" in merged:
         kwargs["enable_thinking"] = bool(merged["think"])
+    if "final_only" in merged:
+        kwargs["final_only"] = bool(merged["final_only"])
+    else:
+        kwargs["final_only"] = True
+    if "reasoning_effort" in merged and merged["reasoning_effort"] is not None:
+        kwargs["reasoning_effort"] = str(merged["reasoning_effort"])
+    if "stop_after_final" in merged:
+        kwargs["stop_after_final"] = bool(merged["stop_after_final"])
+    if merged.get("max_context_tokens") is not None:
+        kwargs["max_context_tokens"] = int(merged["max_context_tokens"])
     rf = merged.get("response_format")
     if rf is not None:
         if isinstance(rf, dict):

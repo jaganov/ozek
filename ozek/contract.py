@@ -16,6 +16,7 @@ FINISH_STOP = "stop"
 FINISH_CANCEL = "cancel"
 FINISH_EOS = "eos"
 FINISH_TIMEOUT = "timeout"
+FINISH_FINAL = "final"
 
 FINISH_REASONS = frozenset(
     {
@@ -24,6 +25,7 @@ FINISH_REASONS = frozenset(
         FINISH_CANCEL,
         FINISH_EOS,
         FINISH_TIMEOUT,
+        FINISH_FINAL,
     }
 )
 
@@ -46,6 +48,10 @@ GENERATE_KEYS = frozenset(
         "repetition_penalty",
         "stop",
         "think",
+        "final_only",
+        "reasoning_effort",
+        "stop_after_final",
+        "max_context_tokens",
         "stream",
         "profile",
         "response_format",
@@ -81,13 +87,15 @@ STATS_KEYS = frozenset(
         "timeout_s",
         "json_retries",
         "attempts",
+        "reasoning_effort",
+        "stop_after_final",
     }
 )
 
 
 def openai_finish_reason(ozek_reason: str) -> str:
     """Map Ozek finish_reason → OpenAI chat.completion finish_reason."""
-    if ozek_reason in (FINISH_STOP, FINISH_EOS, FINISH_CANCEL):
+    if ozek_reason in (FINISH_STOP, FINISH_EOS, FINISH_CANCEL, FINISH_FINAL):
         return OPENAI_STOP
     # length | timeout (and unknown) → length
     return OPENAI_LENGTH
@@ -106,7 +114,20 @@ def normalize_generate_kwargs(req: dict[str, Any]) -> dict[str, Any]:
         "min_p": _as_float(req.get("min_p"), 0.0, "min_p"),
         "stop": req.get("stop"),
         "enable_thinking": bool(req.get("think") or False),
+        # Default UX: show final answer; pass final_only=false / raw for full Harmony.
+        "final_only": True if req.get("final_only") is None else bool(req.get("final_only")),
+        "stop_after_final": (
+            True
+            if req.get("stop_after_final") is None
+            else bool(req.get("stop_after_final"))
+        ),
     }
+    if req.get("reasoning_effort") is not None:
+        kwargs["reasoning_effort"] = str(req["reasoning_effort"])
+    if req.get("max_context_tokens") is not None:
+        kwargs["max_context_tokens"] = _as_int(
+            req["max_context_tokens"], 0, "max_context_tokens"
+        )
     if req.get("repetition_penalty") is not None:
         kwargs["repetition_penalty"] = _as_float(
             req["repetition_penalty"], None, "repetition_penalty"
@@ -162,6 +183,14 @@ def contract_meta() -> dict[str, Any]:
         "structured": {
             "mode": "prompt_nudge_plus_extract",
             "notes": "Not constrained decoding; check parsed / parse_error.",
+        },
+        "harmony": {
+            "fields": ["thinking", "final", "raw"],
+            "notes": (
+                "LLM-jp / Harmony channels; final_only=true (default) shows answer; "
+                "stop_after_final ends decode when final channel closes; "
+                "reasoning_effort=low|medium|high|off."
+            ),
         },
     }
 

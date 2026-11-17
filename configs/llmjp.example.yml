@@ -1,0 +1,73 @@
+# Optional LLM-jp 4.1 Thinking presets (Hub MLX packs — no local absolute paths).
+#
+# Use when you want Japanese thinking models instead of the Qwen default:
+#   cp configs/llmjp.example.yml ozek.yml
+#   ozek run llmjp-short --prompt "空は青い？"
+#
+# Or point --config at this file:
+#   ozek --config configs/llmjp.example.yml run llmjp-short --prompt "..."
+#
+# Built-in profiles (same Hub ids): llmjp41-8b-thinking-4bit | 8bit
+# Aliases: llmjp-4bit | llmjp-8bit | 4bit | 8bit
+
+default_profile: llmjp41-8b-thinking-4bit
+max_context_tokens: 4096
+
+server:
+  host: 127.0.0.1
+  port: 8787
+
+presets:
+  llmjp-short:
+    profile: llmjp41-8b-thinking-4bit
+    max_tokens: 256
+    temperature: 0.0
+    final_only: true
+    reasoning_effort: low
+    stop_after_final: true
+
+  llmjp-short-8bit:
+    profile: llmjp41-8b-thinking-8bit
+    max_tokens: 256
+    temperature: 0.0
+    final_only: true
+    reasoning_effort: low
+    stop_after_final: true
+
+  llmjp-think:
+    profile: llmjp41-8b-thinking-4bit
+    max_tokens: 512
+    temperature: 0.3
+    think: true
+    final_only: false
+    reasoning_effort: medium
+    stop_after_final: true
+
+  llmjp-think-8bit:
+    profile: llmjp41-8b-thinking-8bit
+    max_tokens: 512
+    temperature: 0.3
+    think: true
+    final_only: false
+    reasoning_effort: medium
+    stop_after_final: true
+
+  summarize:
+    system: >
+      Summarize the user's text. Reply with JSON only.
+      Fill the fields; never echo the schema itself.
+    max_tokens: 256
+    temperature: 0.2
+    response_format: json
+    json_retries: 1
+    timeout_s: 60
+    schema:
+      type: object
+      properties:
+        summary:
+          type: string
+        bullets:
+          type: array
+          items:
+            type: string
+      required: [summary, bullets]

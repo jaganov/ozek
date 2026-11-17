@@ -1,6 +1,7 @@
 """Named model profiles for typical Apple Silicon RAM budgets.
 
 Use a profile id via CLI ``--profile`` / JSON ``"profile"``, or pass any HF / MLX id.
+Local absolute paths belong in a gitignored ``ozek.yml`` / ``ozek.local.yml``, not here.
 """
 
 from __future__ import annotations
@@ -50,6 +51,30 @@ PROFILES: dict[str, ModelProfile] = {
         ram_hint_gb=16,
         notes="Heavier; watch memory pressure. Prefer think=false unless needed.",
     ),
+    "llmjp41-8b-thinking-4bit": ModelProfile(
+        id="llmjp41-8b-thinking-4bit",
+        model="andeniel/llm-jp-4.1-8b-thinking-4bit-mlx",
+        label="LLM-jp 4.1 8B Thinking 4-bit (MLX)",
+        quant="4bit",
+        ram_hint_gb=16,
+        notes="Hub MLX pack. Harmony CoT. Override with a local folder in ozek.yml if needed.",
+    ),
+    "llmjp41-8b-thinking-8bit": ModelProfile(
+        id="llmjp41-8b-thinking-8bit",
+        model="andeniel/llm-jp-4.1-8b-thinking-8bit-mlx",
+        label="LLM-jp 4.1 8B Thinking 8-bit (MLX)",
+        quant="8bit",
+        ram_hint_gb=16,
+        notes="Higher-fidelity Hub quant. More RSS than 4-bit.",
+    ),
+}
+
+# Short A/B aliases for HTTP / CLI → canonical profile ids.
+PROFILE_ALIASES: dict[str, str] = {
+    "llmjp-4bit": "llmjp41-8b-thinking-4bit",
+    "llmjp-8bit": "llmjp41-8b-thinking-8bit",
+    "4bit": "llmjp41-8b-thinking-4bit",
+    "8bit": "llmjp41-8b-thinking-8bit",
 }
 
 DEFAULT_MODEL = PROFILES[DEFAULT_PROFILE_ID].model
@@ -57,8 +82,9 @@ DEFAULT_MODEL = PROFILES[DEFAULT_PROFILE_ID].model
 
 def get_profile(name: Optional[str] = None) -> ModelProfile:
     key = (name or DEFAULT_PROFILE_ID).strip().lower()
+    key = PROFILE_ALIASES.get(key, key)
     if key not in PROFILES:
-        known = ", ".join(sorted(PROFILES))
+        known = ", ".join(sorted(set(PROFILES) | set(PROFILE_ALIASES)))
         raise KeyError(f"unknown profile {name!r}; known: {known}")
     return PROFILES[key]
 

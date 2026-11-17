@@ -29,6 +29,7 @@ from .config import (
     preset_to_generate_kwargs,
     resolve_model_from_config,
 )
+from .budget import ContextBudgetError
 from .contract import contract_meta, normalize_generate_kwargs, openai_finish_reason
 from .profiles import DEFAULT_PROFILE_ID, list_profiles, resolve_model
 from .runtime import BusyError, runtime
@@ -84,6 +85,8 @@ def _merge_request(req: dict[str, Any]) -> dict[str, Any]:
     kwargs.update(preset_to_generate_kwargs(merged))
     kwargs.setdefault("max_tokens", 128)
     kwargs.setdefault("temperature", 0.0)
+    if _CONFIG.max_context_tokens is not None:
+        kwargs.setdefault("max_context_tokens", _CONFIG.max_context_tokens)
     return {"model": model, "profile": profile, "kwargs": kwargs}
 
 
@@ -164,9 +167,20 @@ class Handler(BaseHTTPRequestHandler):
             merged = _merge_request(req)
             self._ensure_model(merged["model"], merged["profile"])
             result = runtime.generate(prompt, **merged["kwargs"])
-            _send_json(self, 200, {"ok": True, **result.as_dict()})
+            _send_json(
+                self,
+                200,
+                {
+                    "ok": True,
+                    "profile": merged["profile"],
+                    "model": merged["model"] or runtime.model_id,
+                    **result.as_dict(),
+                },
+            )
         except BusyError as e:
             _send_json(self, 503, {"ok": False, "error": str(e), "code": "busy"})
+        except ContextBudgetError as e:
+            _send_json(self, 400, {"ok": False, **e.as_dict()})
         except KeyError as e:
             _send_json(self, 400, {"ok": False, "error": str(e)})
         except ValueError as e:
@@ -202,12 +216,13 @@ class Handler(BaseHTTPRequestHandler):
                     "id": f"ozek-{uuid.uuid4().hex[:12]}",
                     "object": "chat.completion",
                     "model": runtime.model_id,
+                    "profile": merged["profile"],
                     "choices": [
                         {
                             "index": 0,
                             "message": {
                                 "role": "assistant",
-                                "content": result.text,
+                                "content": result.display_text,
                             },
                             "finish_reason": openai_finish_reason(
                                 result.stats.finish_reason
@@ -221,12 +236,17 @@ class Handler(BaseHTTPRequestHandler):
                         + result.stats.generation_tokens,
                     },
                     "ozek_stats": result.stats.as_dict(),
+                    "thinking": result.thinking,
+                    "final": result.final,
+                    "raw": result.text,
                     "parsed": result.parsed if result.response_format == "json" else None,
                     "parse_error": result.parse_error,
                 },
             )
         except BusyError as e:
             _send_json(self, 503, {"error": str(e), "code": "busy"})
+        except ContextBudgetError as e:
+            _send_json(self, 400, e.as_dict())
         except KeyError as e:
             _send_json(self, 400, {"error": str(e)})
         except ValueError as e:
